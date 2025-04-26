@@ -1,0 +1,9 @@
+﻿fastapi
+uvicorn[standard]
+python-multipart
+celery[redis]
+redis
+pandas
+numpy
+scipy
+matplotlib
