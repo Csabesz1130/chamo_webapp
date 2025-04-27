@@ -10,6 +10,7 @@ from src.utils.email_preferences_manager import EmailPreferencesManager
 from src.utils.article_fetcher import ArticleFetcher
 from src.utils.click_tracker import ClickTracker
 from src.utils.tracking_server import TrackingServer
+from src.utils.article_manager import ArticleManager
 
 class EmailSender:
     """
@@ -31,6 +32,9 @@ class EmailSender:
         
         # Cikk lekérő inicializálása
         self.article_fetcher = ArticleFetcher(email_manager)
+        
+        # Cikk kezelő inicializálása
+        self.article_manager = ArticleManager(email_manager.settings_manager)
         
         # Kattintás követő inicializálása
         self.click_tracker = ClickTracker(email_manager.settings_manager)
@@ -153,6 +157,9 @@ class EmailSender:
             # Kattintás követés URL-ek
             tracking_url = f"http://{self.tracking_server.host}:{self.tracking_server.port}"
             
+            # Ellenőrizzük, hogy a cikk már mentve van-e
+            is_saved = any(a['id'] == article['id'] for a in self.article_manager.get_reading_list())
+            
             html += f"""
                 <div class="article">
                     <div class="title">{article['title']}</div>
@@ -162,7 +169,7 @@ class EmailSender:
                     <div class="score" style="width: {article['score']}%;"></div>
                     <p>
                         <a href="{article['link']}" onclick="trackClick('{read_id}')">Olvasás</a> | 
-                        <a href="save:{article['id']}" onclick="trackClick('{save_id}')">Mentés</a> | 
+                        <a href="save:{article['id']}" onclick="trackClick('{save_id}')" {'disabled' if is_saved else ''}>{'Mentve' if is_saved else 'Mentés'}</a> | 
                         <a href="share:{article['id']}" onclick="trackClick('{share_id}')">Megosztás</a>
                     </p>
                     <img src="{tracking_url}/track/{read_id}" class="tracking-pixel" alt="">
@@ -175,6 +182,13 @@ class EmailSender:
                 function trackClick(id) {{
                     var img = new Image();
                     img.src = '{tracking_url}/track/' + id;
+                    
+                    // Ha mentés vagy megosztás, akkor frissítjük a gombot
+                    if (id.startsWith('save_')) {{
+                        var link = event.target;
+                        link.textContent = 'Mentve';
+                        link.disabled = true;
+                    }}
                 }}
             </script>
             <p>Üdvözlettel,<br>Az Ön Tudományos Összefoglaló Csapata</p>
@@ -202,7 +216,28 @@ class EmailSender:
         """
         try:
             action, article_id = click_id.split('_', 1)
+            
+            # Kattintás követése
             self.click_tracker.track_article_click(article_id, action)
+            
+            # Ha mentés vagy megosztás, akkor elmentjük a cikket
+            if action == 'save':
+                # Megkeressük a cikket
+                articles = self._get_recommended_articles()
+                article = next((a for a in articles if a['id'] == article_id), None)
+                
+                if article:
+                    self.article_manager.save_to_reading_list(article)
+            
+            elif action == 'share':
+                # Megkeressük a cikket
+                articles = self._get_recommended_articles()
+                article = next((a for a in articles if a['id'] == article_id), None)
+                
+                if article:
+                    # Itt kellene egy projekt azonosító, de most csak egy példa
+                    self.article_manager.share_article(article, 'default_project')
+            
             app_logger.debug(f"Kattintás rögzítve: {click_id}")
         except Exception as e:
             app_logger.error(f"Hiba a kattintás rögzítésekor: {str(e)}") 

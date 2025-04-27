@@ -1,0 +1,15 @@
+# Adatbetöltés és feldolgozás
+biopython==1.83
+feedparser==6.0.10
+pydantic==2.5.2
+
+# Adattárolás
+pyarrow==14.0.1
+pandas==2.1.4
+
+# Naplózás és hibakezelés
+python-json-logger==2.0.7
+
+# Tesztelés
+pytest==7.4.3
+pytest-cov==4.1.0 
