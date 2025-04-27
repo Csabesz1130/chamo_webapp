@@ -15,6 +15,9 @@ from src.io_utils.io_utils import ATFHandler
 from src.filtering.filtering import combined_filter
 from src.analysis.action_potential import ActionPotentialProcessor
 import os, time
+from src.utils.email_preferences_manager import EmailPreferencesManager
+from src.utils.email_sender import EmailSender
+from src.gui.email_preferences_tab import EmailPreferencesTab
 print(f"app.py last modified: {time.ctime(os.path.getmtime(__file__))}")
 
 class SignalAnalyzerApp:
@@ -30,6 +33,28 @@ class SignalAnalyzerApp:
         self.action_potential_processor = None
         self.current_filepath = None
         self.point_tracker = None
+        
+        # E-mail beállítások inicializálása
+        self.settings_manager = PersistentSettingsManager()
+        self.email_manager = EmailPreferencesManager(self.settings_manager)
+        
+        # E-mail küldő inicializálása
+        self.email_sender = EmailSender(self.email_manager, {
+            'host': 'smtp.gmail.com',
+            'port': 587,
+            'use_tls': True,
+            'username': 'your-email@gmail.com',  # Ezt a felhasználónak kell beállítania
+            'password': 'your-password',  # Ezt a felhasználónak kell beállítania
+            'from_email': 'your-email@gmail.com',
+            'to_email': 'user-email@example.com'
+        })
+        
+        # E-mail beállítások tab hozzáadása
+        self.email_tab = EmailPreferencesTab(self.notebook, self.email_manager)
+        self.notebook.add(self.email_tab.frame, text="E-mail Beállítások")
+        
+        # E-mail küldő szolgáltatás indítása
+        self.email_sender.start()
         
         # Create main container
         self.setup_main_layout()
@@ -112,6 +137,7 @@ class SignalAnalyzerApp:
         self.notebook.add(self.analysis_tab.frame, text='Analysis')
         self.notebook.add(self.view_tab.frame, text='View')
         self.notebook.add(self.action_potential_tab.frame, text='Action Potential')
+        self.notebook.add(self.email_tab.frame, text="E-mail Beállítások")
 
     def load_data(self):
         """Load data from file"""
@@ -660,6 +686,15 @@ class SignalAnalyzerApp:
                 self.master.destroy()
             except Exception as destroy_e:
                 app_logger.critical(f"Nem sikerült a master ablakot bezárni sem: {destroy_e}")
+
+    def __del__(self):
+        """Az osztály destruktora."""
+        try:
+            # E-mail küldő szolgáltatás leállítása
+            if hasattr(self, 'email_sender'):
+                self.email_sender.stop()
+        except Exception as e:
+            app_logger.error(f"Hiba az e-mail küldő leállításakor: {str(e)}")
 
 # Only add this if it's in the main script file
 if __name__ == "__main__":

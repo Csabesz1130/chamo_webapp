@@ -1,36 +1,39 @@
-﻿from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException
-from uuid import uuid4
-from pathlib import Path
-import json, shutil
-from ap_analyzer.analysis.action_potential import ActionPotentialProcessor
-from ap_analyzer.io_utils.io_utils import ATFHandler
+﻿from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from .api import router as api_router
+import asyncio
+import json
 
-DATA_DIR = Path("/data")
-DATA_DIR.mkdir(exist_ok=True, parents=True)
-app = FastAPI(title="AP-Analyzer API")
+app = FastAPI(title="Chamo-web API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+app.include_router(api_router)
 
-@app.post("/analyze")
-async def analyze(file: UploadFile, bg: BackgroundTasks):
-    task_id = uuid4().hex
-    infile  = DATA_DIR / f"{task_id}.atf"
-    infile.write_bytes(await file.read())
-    bg.add_task(run_analysis, infile, task_id)
-    return {"task_id": task_id, "status": "PENDING"}
+async def generate_derivative_data(data, time_data):
+    """Generálja a derivált adatokat darabonként"""
+    for i in range(1, len(data)):
+        # Számítsuk ki a deriváltat
+        derivative = (data[i] - data[i-1]) / (time_data[i] - time_data[i-1])
+        
+        # Küldjük el az adatot
+        yield f"data: {json.dumps({'x': time_data[i], 'y': derivative})}\n\n"
+        await asyncio.sleep(0.01)  # Kis késleltetés a valós idejű hatásért
 
-@app.get("/result/{task_id}")
-def result(task_id: str):
-    meta = DATA_DIR / f"{task_id}.json"
-    if not meta.exists():
-        raise HTTPException(404)
-    return json.loads(meta.read_text())
-
-def run_analysis(path: Path, task_id: str):
-    try:
-        h = ATFHandler(str(path))
-        h.load_atf()
-        proc = ActionPotentialProcessor()
-        proc.set_data(h.get_column("#1"), h.get_column("Time"))
-        res = proc.analyze()
-        (DATA_DIR / f"{task_id}.json").write_text(json.dumps(res, default=str))
-    except Exception as exc:
-        (DATA_DIR / f"{task_id}.json").write_text(json.dumps({"error": str(exc)}))
+@app.get("/stream-derivative")
+async def stream_derivative(request: Request):
+    """SSE végpont a derivált adatok streameléséhez"""
+    # TODO: Itt kellene lekérni a valós adatokat
+    # Példa adatok:
+    data = [1, 2, 3, 4, 5]
+    time_data = [0, 1, 2, 3, 4]
+    
+    return StreamingResponse(
+        generate_derivative_data(data, time_data),
+        media_type="text/event-stream"
+    )
