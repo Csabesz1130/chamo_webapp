@@ -3,20 +3,24 @@ from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from src.utils.logger import app_logger
 from src.utils.email_preferences_manager import EmailPreferencesManager
+from src.utils.deta_client import DetaClient
+from src.config.deta_config import DetaConfig
 
 class ArticleFetcher:
     """
-    A cikkek lekéréséért felelős osztály a különböző forrásokból.
+    A cikkek lekéréséért és tárolásáért felelős osztály.
     """
     
-    def __init__(self, email_manager: EmailPreferencesManager):
+    def __init__(self, email_manager: EmailPreferencesManager, deta_config: DetaConfig):
         """
         Inicializálja az ArticleFetcher-t.
         
         Args:
             email_manager: Az EmailPreferencesManager példány
+            deta_config: A Deta konfigurációs objektum
         """
         self.email_manager = email_manager
+        self.deta_client = DetaClient(deta_config)
         
         # API kulcsok és végpontok
         self.pubmed_api_key = None  # A felhasználónak kell beállítania
@@ -27,7 +31,7 @@ class ArticleFetcher:
     
     def get_recommended_articles(self) -> List[Dict[str, Any]]:
         """
-        Lekéri a javasolt cikkeket a beállított forrásokból.
+        Lekéri a javasolt cikkeket a beállított forrásokból és elmenti őket.
         
         Returns:
             List[Dict[str, Any]]: A javasolt cikkek listája
@@ -45,12 +49,20 @@ class ArticleFetcher:
         # Lekérjük a cikkeket minden forrásból
         for source in sources:
             try:
+                source_articles = []
                 if source == 'PubMed':
-                    articles.extend(self._fetch_from_pubmed(keywords, keyword_logic))
+                    source_articles = self._fetch_from_pubmed(keywords, keyword_logic)
                 elif source == 'bioRxiv':
-                    articles.extend(self._fetch_from_biorxiv(keywords, keyword_logic))
+                    source_articles = self._fetch_from_biorxiv(keywords, keyword_logic)
                 elif source == 'arXiv-q-bio':
-                    articles.extend(self._fetch_from_arxiv(keywords, keyword_logic))
+                    source_articles = self._fetch_from_arxiv(keywords, keyword_logic)
+                
+                # Elmentjük a cikkeket a Deta Base-be
+                for article in source_articles:
+                    article_id = self.deta_client.store_article(article)
+                    article['id'] = article_id
+                    articles.append(article)
+                    
             except Exception as e:
                 app_logger.error(f"Hiba a cikkek lekérésekor a {source} forrásból: {str(e)}")
         
@@ -59,6 +71,30 @@ class ArticleFetcher:
         
         # Visszaadjuk az első 5 legrelevánsabb cikket
         return articles[:5]
+    
+    def get_article_by_id(self, article_id: str) -> Dict[str, Any]:
+        """
+        Lekér egy cikket azonosító alapján.
+        
+        Args:
+            article_id: A cikk azonosítója
+            
+        Returns:
+            A cikk adatai vagy None ha nem található
+        """
+        return self.deta_client.get_article(article_id)
+    
+    def get_articles_by_query(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Lekéri a cikkeket egy szűrési feltétel alapján.
+        
+        Args:
+            query: A szűrési feltételek
+            
+        Returns:
+            A szűrt cikkek listája
+        """
+        return self.deta_client.list_articles(query)
     
     def _fetch_from_pubmed(self, keywords: List[str], logic: str) -> List[Dict[str, Any]]:
         """Lekéri a cikkeket a PubMed-ből."""

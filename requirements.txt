@@ -6,6 +6,7 @@ pydantic==2.5.2
 # Adattárolás
 pyarrow==14.0.1
 pandas==2.1.4
+deta==1.2.0  # Deta Space SDK
 
 # Naplózás és hibakezelés
 python-json-logger==2.0.7
