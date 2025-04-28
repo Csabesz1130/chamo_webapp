@@ -1,128 +1,266 @@
 """
-Ütemezett feladatok kezelése Celery vagy APScheduler használatával.
+Ütemezett feladatok kezelése különböző ütemezőkkel.
 """
 import os
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from typing import Optional, Callable, Dict, Any
+from datetime import datetime
+from celery import Celery
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from src.utils.logger import app_logger
-
-# Celery vagy APScheduler használata a környezeti változó alapján
-USE_CELERY = os.getenv('USE_CELERY', 'false').lower() == 'true'
-
-if USE_CELERY:
-    from celery import Celery
-    from celery.schedules import crontab
-    
-    # Celery app inicializálása Redis backend-del
-    celery_app = Celery(
-        'ap_analyzer',
-        broker='redis://localhost:6379/0',
-        backend='redis://localhost:6379/0'
-    )
-else:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.cron import CronTrigger
+from src.config.scheduler_config import SchedulerConfig
 
 class TaskScheduler:
     """Ütemezett feladatok kezelése."""
     
-    def __init__(self):
-        """Inicializálja az ütemezőt."""
-        self.scheduler = None
-        if not USE_CELERY:
-            self.scheduler = BackgroundScheduler()
-            self.scheduler.start()
-        app_logger.info(f"Ütemező inicializálva: {'Celery' if USE_CELERY else 'APScheduler'}")
-    
-    def schedule_digest_job(self, user_id: str, preferred_time: str) -> None:
+    def __init__(self, config: Optional[SchedulerConfig] = None):
         """
-        Beütemez egy digest küldési feladatot.
+        Inicializálja az ütemezőt.
         
         Args:
-            user_id: Felhasználó azonosító
-            preferred_time: Preferált küldési idő (HH:MM formátumban)
+            config: Ütemező konfigurációs objektum
+        """
+        self.config = config or SchedulerConfig.from_env()
+        
+        if self.config.scheduler_type == 'celery':
+            self._init_celery()
+        else:  # apscheduler
+            self._init_apscheduler()
+            
+        app_logger.info(f"Ütemező inicializálva: {self.config.scheduler_type}")
+    
+    def _init_celery(self) -> None:
+        """Celery ütemező inicializálása."""
+        self.scheduler = Celery(
+            'tasks',
+            broker=self.config.celery_broker_url,
+            backend=self.config.celery_backend_url
+        )
+        
+        # Celery konfigurációk beállítása
+        self.scheduler.conf.update(
+            task_serializer=self.config.celery_task_serializer,
+            result_serializer=self.config.celery_result_serializer,
+            accept_content=self.config.celery_accept_content,
+            task_track_started=self.config.celery_task_track_started,
+            task_time_limit=self.config.celery_task_time_limit,
+            worker_prefetch_multiplier=self.config.celery_worker_prefetch_multiplier,
+            timezone=self.config.timezone
+        )
+    
+    def _init_apscheduler(self) -> None:
+        """APScheduler ütemező inicializálása."""
+        self.scheduler = BackgroundScheduler(
+            job_defaults=self.config.apscheduler_job_defaults,
+            executors=self.config.apscheduler_executors,
+            timezone=self.config.timezone
+        )
+        self.scheduler.start()
+    
+    def schedule_task(
+        self,
+        task_func: Callable,
+        cron_expression: str,
+        task_id: str,
+        **kwargs: Dict[str, Any]
+    ) -> bool:
+        """
+        Ütemezett feladat hozzáadása.
+        
+        Args:
+            task_func: A végrehajtandó függvény
+            cron_expression: Cron kifejezés az ütemezéshez
+            task_id: Feladat azonosító
+            **kwargs: További paraméterek a feladathoz
+            
+        Returns:
+            bool: Sikeres volt-e a hozzáadás
         """
         try:
-            hour, minute = map(int, preferred_time.split(':'))
-            
-            if USE_CELERY:
-                # Celery ütemezés
-                celery_app.add_periodic_task(
-                    crontab(hour=hour, minute=minute),
-                    compose_and_send_digest.s(user_id)
-                )
-            else:
-                # APScheduler ütemezés
+            if self.config.scheduler_type == 'celery':
+                # Celery esetén dekorátor hozzáadása
+                task = self.scheduler.task(
+                    name=task_id,
+                    bind=True,
+                    **kwargs
+                )(task_func)
+                
+                # Cron ütemezés beállítása
+                self.scheduler.conf.beat_schedule[task_id] = {
+                    'task': task_id,
+                    'schedule': cron_expression,
+                    'kwargs': kwargs
+                }
+                
+            else:  # apscheduler
+                # APScheduler esetén közvetlen hozzáadás
                 self.scheduler.add_job(
-                    compose_and_send_digest,
-                    CronTrigger(hour=hour, minute=minute),
-                    args=[user_id],
-                    id=f'digest_{user_id}'
+                    task_func,
+                    CronTrigger.from_crontab(cron_expression),
+                    id=task_id,
+                    replace_existing=True,
+                    **kwargs
                 )
             
-            app_logger.info(f"Digest feladat ütemezve: {user_id} - {preferred_time}")
+            app_logger.info(f"Feladat ütemezve: {task_id}")
+            return True
             
         except Exception as e:
             app_logger.error(f"Hiba a feladat ütemezésekor: {str(e)}")
+            return False
     
-    def remove_digest_job(self, user_id: str) -> None:
+    def remove_task(self, task_id: str) -> bool:
         """
-        Eltávolít egy ütemezett digest feladatot.
+        Ütemezett feladat eltávolítása.
         
         Args:
-            user_id: Felhasználó azonosító
+            task_id: Feladat azonosító
+            
+        Returns:
+            bool: Sikeres volt-e az eltávolítás
         """
         try:
-            if not USE_CELERY:
-                self.scheduler.remove_job(f'digest_{user_id}')
-            # Celery esetén nincs egyszerű módja a feladat eltávolításának
+            if self.config.scheduler_type == 'celery':
+                # Celery esetén törlés a beat_schedule-ból
+                if task_id in self.scheduler.conf.beat_schedule:
+                    del self.scheduler.conf.beat_schedule[task_id]
+                
+            else:  # apscheduler
+                # APScheduler esetén közvetlen törlés
+                self.scheduler.remove_job(task_id)
             
-            app_logger.info(f"Digest feladat eltávolítva: {user_id}")
+            app_logger.info(f"Feladat eltávolítva: {task_id}")
+            return True
             
         except Exception as e:
             app_logger.error(f"Hiba a feladat eltávolításakor: {str(e)}")
+            return False
     
-    def shutdown(self) -> None:
-        """Leállítja az ütemezőt."""
-        if not USE_CELERY and self.scheduler:
-            self.scheduler.shutdown()
-            app_logger.info("Ütemező leállítva")
-
-# Celery task definíció
-if USE_CELERY:
-    @celery_app.task
-    def compose_and_send_digest(user_id: str) -> None:
+    def modify_task(
+        self,
+        task_id: str,
+        cron_expression: Optional[str] = None,
+        **kwargs: Dict[str, Any]
+    ) -> bool:
         """
-        Összeállítja és elküldi a digest-et.
+        Ütemezett feladat módosítása.
         
         Args:
-            user_id: Felhasználó azonosító
+            task_id: Feladat azonosító
+            cron_expression: Új cron kifejezés (opcionális)
+            **kwargs: Új paraméterek a feladathoz
+            
+        Returns:
+            bool: Sikeres volt-e a módosítás
         """
-        from src.email.email_sender import EmailSender
-        
         try:
-            sender = EmailSender()
-            sender.send_digest(user_id)
-            app_logger.info(f"Digest elküldve: {user_id}")
+            if self.config.scheduler_type == 'celery':
+                # Celery esetén módosítás a beat_schedule-ban
+                if task_id in self.scheduler.conf.beat_schedule:
+                    if cron_expression:
+                        self.scheduler.conf.beat_schedule[task_id]['schedule'] = cron_expression
+                    if kwargs:
+                        self.scheduler.conf.beat_schedule[task_id]['kwargs'].update(kwargs)
+                else:
+                    raise ValueError(f"Nem található feladat: {task_id}")
+                
+            else:  # apscheduler
+                # APScheduler esetén közvetlen módosítás
+                job = self.scheduler.get_job(task_id)
+                if job:
+                    if cron_expression:
+                        job.reschedule(CronTrigger.from_crontab(cron_expression))
+                    if kwargs:
+                        job.modify(**kwargs)
+                else:
+                    raise ValueError(f"Nem található feladat: {task_id}")
+            
+            app_logger.info(f"Feladat módosítva: {task_id}")
+            return True
             
         except Exception as e:
-            app_logger.error(f"Hiba a digest küldésekor: {str(e)}")
-            
-# APScheduler task definíció
-else:
-    def compose_and_send_digest(user_id: str) -> None:
+            app_logger.error(f"Hiba a feladat módosításakor: {str(e)}")
+            return False
+    
+    def get_task_info(self, task_id: str) -> Optional[Dict[str, Any]]:
         """
-        Összeállítja és elküldi a digest-et.
+        Ütemezett feladat információinak lekérése.
         
         Args:
-            user_id: Felhasználó azonosító
+            task_id: Feladat azonosító
+            
+        Returns:
+            Dict[str, Any]: Feladat információk vagy None, ha nem található
         """
-        from src.email.email_sender import EmailSender
-        
         try:
-            sender = EmailSender()
-            sender.send_digest(user_id)
-            app_logger.info(f"Digest elküldve: {user_id}")
+            if self.config.scheduler_type == 'celery':
+                # Celery esetén információk a beat_schedule-ból
+                if task_id in self.scheduler.conf.beat_schedule:
+                    schedule = self.scheduler.conf.beat_schedule[task_id]
+                    return {
+                        'id': task_id,
+                        'schedule': str(schedule['schedule']),
+                        'kwargs': schedule['kwargs'],
+                        'last_run': None  # Celery nem tárolja
+                    }
+                
+            else:  # apscheduler
+                # APScheduler esetén közvetlen lekérés
+                job = self.scheduler.get_job(task_id)
+                if job:
+                    return {
+                        'id': job.id,
+                        'schedule': str(job.trigger),
+                        'kwargs': job.kwargs,
+                        'last_run': job.next_run_time.isoformat() if job.next_run_time else None
+                    }
+            
+            return None
             
         except Exception as e:
-            app_logger.error(f"Hiba a digest küldésekor: {str(e)}") 
+            app_logger.error(f"Hiba a feladat információk lekérésekor: {str(e)}")
+            return None
+    
+    def list_tasks(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Összes ütemezett feladat listázása.
+        
+        Returns:
+            Dict[str, Dict[str, Any]]: Feladatok és információik
+        """
+        try:
+            tasks = {}
+            
+            if self.config.scheduler_type == 'celery':
+                # Celery esetén feladatok a beat_schedule-ból
+                for task_id, schedule in self.scheduler.conf.beat_schedule.items():
+                    tasks[task_id] = {
+                        'id': task_id,
+                        'schedule': str(schedule['schedule']),
+                        'kwargs': schedule['kwargs'],
+                        'last_run': None  # Celery nem tárolja
+                    }
+                
+            else:  # apscheduler
+                # APScheduler esetén az összes job lekérése
+                for job in self.scheduler.get_jobs():
+                    tasks[job.id] = {
+                        'id': job.id,
+                        'schedule': str(job.trigger),
+                        'kwargs': job.kwargs,
+                        'last_run': job.next_run_time.isoformat() if job.next_run_time else None
+                    }
+            
+            return tasks
+            
+        except Exception as e:
+            app_logger.error(f"Hiba a feladatok listázásakor: {str(e)}")
+            return {}
+    
+    def __del__(self):
+        """Destruktor a megfelelő leállításhoz."""
+        if self.config.scheduler_type == 'apscheduler':
+            try:
+                self.scheduler.shutdown()
+            except:
+                pass 
